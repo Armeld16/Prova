@@ -1,0 +1,151 @@
+from database.DB_connect import DBConnect
+from model.constructor import Constructor
+
+class DAO():
+
+    @staticmethod
+    def getAllYears():
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = "SELECT DISTINCT year FROM seasons ORDER BY year"
+        cursor.execute(query)
+        res = [row["year"] for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getNodi(y1, y2):
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT DISTINCT c.constructorId, c.constructorRef, c.name, c.nationality, c.url
+            FROM constructors c, results r, races ra
+            WHERE c.constructorId = r.constructorId
+            AND r.raceId = ra.raceId
+            AND ra.year BETWEEN %s AND %s
+            AND r.position IS NOT NULL
+        """
+        cursor.execute(query, (y1, y2))
+        res = [Constructor(**row) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getArchi(y1, y2):
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT r1.constructorId AS c1, r2.constructorId AS c2,
+                   COUNT(DISTINCT r1.driverId) AS peso
+            FROM results r1, results r2, races ra1, races ra2
+            WHERE r1.driverId = r2.driverId
+            AND r1.constructorId < r2.constructorId
+            AND r1.raceId = ra1.raceId
+            AND r2.raceId = ra2.raceId
+            AND ra1.year BETWEEN %s AND %s
+            AND ra2.year BETWEEN %s AND %s
+            AND r1.position IS NOT NULL
+            AND r2.position IS NOT NULL
+            GROUP BY c1, c2
+        """
+        cursor.execute(query, (y1, y2, y1, y2))
+        res = [(row["c1"], row["c2"], row["peso"]) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+
+
+from database.DB_connect import DBConnect
+from model.constructor import Constructor
+
+class DAO():
+
+    @staticmethod
+    def getAllYears():
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = "SELECT DISTINCT year FROM seasons ORDER BY year"
+        cursor.execute(query)
+        res = [row["year"] for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getNodi(y1, y2):
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT DISTINCT c.constructorId, c.constructorRef, c.name, c.nationality, c.url
+            FROM constructors c, results r, races ra
+            WHERE c.constructorId = r.constructorId
+            AND r.raceId = ra.raceId
+            AND ra.year BETWEEN %s AND %s
+            AND r.position IS NOT NULL
+        """
+        cursor.execute(query, (y1, y2))
+        res = [Constructor(**row) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getArchi(y1, y2):
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT r1.constructorId AS c1, r2.constructorId AS c2,
+                   COUNT(DISTINCT r1.driverId) AS peso
+            FROM results r1, results r2, races ra1, races ra2
+            WHERE r1.driverId = r2.driverId
+            AND r1.constructorId < r2.constructorId
+            AND r1.raceId = ra1.raceId
+            AND r2.raceId = ra2.raceId
+            AND ra1.year BETWEEN %s AND %s
+            AND ra2.year BETWEEN %s AND %s
+            AND r1.position IS NOT NULL
+            AND r2.position IS NOT NULL
+            GROUP BY c1, c2
+        """
+        cursor.execute(query, (y1, y2, y1, y2))
+        res = [(row["c1"], row["c2"], row["peso"]) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+
+
+import networkx as nx
+from database.DAO import DAO
+
+class Model:
+    def __init__(self):
+        self._graph = nx.Graph()
+        self._idMap = {}
+
+    def buildGraph(self, y1, y2):
+        self._graph.clear()
+        self._idMap.clear()
+        nodi = DAO.getNodi(y1, y2)
+        for n in nodi:
+            self._idMap[n.constructorId] = n
+        self._graph.add_nodes_from(nodi)
+        for c1, c2, peso in DAO.getArchi(y1, y2):
+            self._graph.add_edge(self._idMap[c1], self._idMap[c2], weight=peso)
+
+    def graphDetails(self):
+        return len(self._graph.nodes), len(self._graph.edges)
+
+    def getTop3Archi(self):
+        return sorted(self._graph.edges(data=True),
+                      key=lambda x: x[2]["weight"], reverse=True)[:3]
+
+    def getNumeroComponenti(self):
+        return nx.number_connected_components(self._graph)
+
+    def getMaggioreOrdinata(self):
+        largest = max(nx.connected_components(self._graph), key=len)
+        ordinati = sorted(largest,
+                          key=lambda n: self._graph.degree(n), reverse=True)
+        return [(n, self._graph.degree(n)) for n in ordinati]
+
+    def fillDD(self):
+        return DAO.getAllYears()
+
