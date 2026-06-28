@@ -1,0 +1,237 @@
+=== Artist.py ===
+
+from dataclasses import dataclass
+
+@dataclass
+class Artist:
+    ArtistId: int
+    Name: str
+
+    def __hash__(self): return hash(self.ArtistId)
+    def __eq__(self, other): return self.ArtistId == other.ArtistId
+    def __str__(self): return self.Name if self.Name else ""
+
+
+=== DAO.py ===
+
+from database.DB_connect import DBConnect
+from model.artist import Artist
+
+class DAO():
+
+    @staticmethod
+    def getGenres():
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = "SELECT DISTINCT Name FROM Genre ORDER BY Name ASC"
+        cursor.execute(query)
+        res = [row["Name"] for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getNodi(genre):
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT DISTINCT a.ArtistId, a.Name
+            FROM Artist a, Album al, Track t, Genre g
+            WHERE a.ArtistId = al.ArtistId
+            AND al.AlbumId = t.AlbumId
+            AND t.GenreId = g.GenreId
+            AND g.Name = %s
+        """
+        cursor.execute(query, (genre,))
+        res = [Artist(**row) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getPopolarita(genre):
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT a.ArtistId, SUM(il.Quantity) AS pop
+            FROM Artist a, Album al, Track t, Genre g, InvoiceLine il
+            WHERE a.ArtistId = al.ArtistId
+            AND al.AlbumId = t.AlbumId
+            AND t.GenreId = g.GenreId
+            AND g.Name = %s
+            AND il.TrackId = t.TrackId
+            GROUP BY a.ArtistId
+        """
+        cursor.execute(query, (genre,))
+        res = [(row["ArtistId"], row["pop"]) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getArchi(genre):
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT DISTINCT al1.ArtistId AS id1, al2.ArtistId AS id2
+            FROM Invoice i,
+                 InvoiceLine il1, Track t1, Album al1, Genre g1,
+                 InvoiceLine il2, Track t2, Album al2, Genre g2
+            WHERE il1.InvoiceId = i.InvoiceId
+            AND il2.InvoiceId = i.InvoiceId
+            AND il1.TrackId = t1.TrackId
+            AND t1.AlbumId = al1.AlbumId
+            AND t1.GenreId = g1.GenreId
+            AND g1.Name = %s
+            AND il2.TrackId = t2.TrackId
+            AND t2.AlbumId = al2.AlbumId
+            AND t2.GenreId = g2.GenreId
+            AND g2.Name = %s
+            AND al1.ArtistId < al2.ArtistId
+        """
+        cursor.execute(query, (genre, genre))
+        res = [(row["id1"], row["id2"]) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+
+=== Model.py ===
+
+import networkx as nx
+from database.DAO import DAO
+
+class Model:
+    def __init__(self):
+        self._graph = nx.DiGraph()
+        self._idMap = {}
+        self._popMap = {}
+
+    def buildGraph(self, genre):
+        self._graph.clear()
+        self._idMap.clear()
+        self._popMap.clear()
+        nodi = DAO.getNodi(genre)
+        for n in nodi:
+            self._idMap[n.ArtistId] = n
+        self._graph.add_nodes_from(nodi)
+        for aid, pop in DAO.getPopolarita(genre):
+            self._popMap[aid] = pop
+        for id1, id2 in DAO.getArchi(genre):
+            if id1 not in self._idMap or id2 not in self._idMap:
+                continue
+            pop1 = self._popMap.get(id1, 0)
+            pop2 = self._popMap.get(id2, 0)
+            peso = pop1 + pop2
+            if pop1 > pop2:
+                self._graph.add_edge(self._idMap[id1], self._idMap[id2], weight=peso)
+            elif pop2 > pop1:
+                self._graph.add_edge(self._idMap[id2], self._idMap[id1], weight=peso)
+            else:
+                self._graph.add_edge(self._idMap[id1], self._idMap[id2], weight=peso)
+                self._graph.add_edge(self._idMap[id2], self._idMap[id1], weight=peso)
+
+    def graphDetails(self):
+        return len(self._graph.nodes), len(self._graph.edges)
+
+    def getTop5Archi(self):
+        return sorted(self._graph.edges(data=True),
+                      key=lambda x: x[2]["weight"], reverse=True)[:5]
+
+    def getArtistaMigliore(self):
+        best, bestScore = None, None
+        for v in self._graph.nodes():
+            out = sum(d["weight"] for _, _, d in self._graph.out_edges(v, data=True))
+            inn = sum(d["weight"] for _, _, d in self._graph.in_edges(v, data=True))
+            score = out - inn
+            if bestScore is None or score > bestScore:
+                bestScore, best = score, v
+        return best, bestScore
+
+    def getGenres(self):
+        return DAO.getGenres()
+
+
+=== Controller.py ===
+
+import flet as ft
+
+class Controller:
+    def __init__(self, view, model):
+        self._view = view
+        self._model = model
+
+    def handleCreaGrafo(self, e):
+        genre = self._view._ddGenre.value
+        if genre is None:
+            self._view.txt_result.controls.clear()
+            self._view.txt_result.controls.append(ft.Text("Selezionare un genere", color="red"))
+            self._view.update_page(); return
+        self._model.buildGraph(genre)
+        nodi, archi = self._model.graphDetails()
+        self._view.txt_result.controls.clear()
+        self._view.txt_result.controls.append(ft.Text("Grafo correttamente creato"))
+        self._view.txt_result.controls.append(ft.Text(f"Numero di nodi: {nodi}"))
+        self._view.txt_result.controls.append(ft.Text(f"Numero di archi: {archi}"))
+        best, score = self._model.getArtistaMigliore()
+        self._view.txt_result.controls.append(
+            ft.Text(f"Artista più influente: {best}, con influenza: {score}"))
+        top5 = self._model.getTop5Archi()
+        self._view.txt_result.controls.append(ft.Text("Top 5 archi:"))
+        for a in top5:
+            self._view.txt_result.controls.append(
+                ft.Text(f"{a[0]} -> {a[1]}: {a[2]['weight']}"))
+        self._view.update_page()
+
+    def handleTrovaCammino(self, e):
+        pass
+
+    def fillDD(self):
+        for g in self._model.getGenres():
+            self._view._ddGenre.options.append(ft.dropdown.Option(g))
+        self._view.update_page()
+
+
+=== View.py ===
+
+import flet as ft
+
+class View(ft.UserControl):
+    def __init__(self, page: ft.Page):
+        super().__init__()
+        self._page = page
+        self._page.title = "TdP-Simulazione esame Chinook"
+        self._page.horizontal_alignment = 'CENTER'
+        self._page.theme_mode = ft.ThemeMode.LIGHT
+        self._page.window_height = 800
+        self._controller = None
+
+    def load_interface(self):
+        title = ft.Text("TdP-Simulazione esame Chinook", color="blue", size=24)
+        self._page.controls.append(title)
+
+        self._ddGenre = ft.Dropdown(label="Genre", width=300)
+        self._btnCreaGrafo = ft.ElevatedButton(
+            text="Crea Grafo",
+            on_click=self._controller.handleCreaGrafo)
+
+        self._ddArtist = ft.Dropdown(label="Artist", width=300)
+        self._btnCammino = ft.ElevatedButton(
+            text="Trova Cammino",
+            on_click=self._controller.handleTrovaCammino)
+
+        row1 = ft.Row([self._ddGenre, self._btnCreaGrafo],
+                      alignment=ft.MainAxisAlignment.CENTER)
+        row2 = ft.Row([self._ddArtist, self._btnCammino],
+                      alignment=ft.MainAxisAlignment.CENTER)
+
+        self._page.controls.append(row1)
+        self._page.controls.append(row2)
+
+        self.txt_result = ft.ListView(expand=1, spacing=10, padding=20, auto_scroll=True)
+        self._page.controls.append(self.txt_result)
+
+        self._controller.fillDD()
+        self._page.update()
+
+    def set_controller(self, controller):
+        self._controller = controller
+
+    def update_page(self):
+        self._page.update()
