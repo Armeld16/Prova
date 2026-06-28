@@ -1,0 +1,166 @@
+=== Actor.py ===
+
+from dataclasses import dataclass
+
+@dataclass
+class Actor:
+    id: str
+    name: str
+    date_of_birth: str
+
+    def __hash__(self): return hash(self.id)
+    def __eq__(self, other): return self.id == other.id
+    def __str__(self): return self.name if self.name else ""
+
+
+=== DAO.py ===
+
+from database.DB_connect import DBConnect
+from model.actor import Actor
+
+class DAO():
+
+    @staticmethod
+    def getVoti():
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """SELECT DISTINCT avg_rating
+                   FROM ratings
+                   ORDER BY avg_rating ASC"""
+        cursor.execute(query)
+        res = [row["avg_rating"] for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getNodi(v1, v2):
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT DISTINCT n.id, n.name, n.date_of_birth
+            FROM names n, role_mapping rm, ratings r
+            WHERE n.id = rm.name_id
+            AND rm.movie_id = r.movie_id
+            AND r.avg_rating BETWEEN %s AND %s
+            AND n.date_of_birth IS NOT NULL
+        """
+        cursor.execute(query, (v1, v2))
+        res = [Actor(**row) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getArchi(v1, v2):
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT rm1.name_id AS id1, rm2.name_id AS id2,
+                   SUM(COALESCE(
+                       CAST(REPLACE(REPLACE(m.worlwide_gross_income, '$ ', ''), ',', '')
+                       AS UNSIGNED), 0)) AS peso
+            FROM role_mapping rm1, role_mapping rm2, movie m, ratings r
+            WHERE rm1.movie_id = rm2.movie_id
+            AND rm1.movie_id = m.id
+            AND m.id = r.movie_id
+            AND r.avg_rating BETWEEN %s AND %s
+            AND rm1.name_id < rm2.name_id
+            GROUP BY rm1.name_id, rm2.name_id
+        """
+        cursor.execute(query, (v1, v2))
+        res = [(row["id1"], row["id2"], row["peso"]) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+
+=== Model.py ===
+
+import networkx as nx
+from database.DAO import DAO
+
+class Model:
+    def __init__(self):
+        self._graph = nx.Graph()
+        self._idMap = {}
+
+    def buildGraph(self, v1, v2):
+        self._graph.clear()
+        self._idMap.clear()
+        nodi = DAO.getNodi(v1, v2)
+        for n in nodi:
+            self._idMap[n.id] = n
+        self._graph.add_nodes_from(nodi)
+        for id1, id2, peso in DAO.getArchi(v1, v2):
+            if id1 in self._idMap and id2 in self._idMap:
+                self._graph.add_edge(self._idMap[id1], self._idMap[id2], weight=peso)
+
+    def graphDetails(self):
+        return len(self._graph.nodes), len(self._graph.edges)
+
+    def getTop5Archi(self):
+        return sorted(self._graph.edges(data=True),
+                      key=lambda x: x[2]["weight"], reverse=True)[:5]
+
+    def getNumeroComponenti(self):
+        return nx.number_connected_components(self._graph)
+
+    def getMaggioreComponente(self):
+        return max(nx.connected_components(self._graph), key=len)
+
+    def getVoti(self):
+        return DAO.getVoti()
+
+
+=== Controller.py ===
+
+import flet as ft
+
+class Controller:
+    def __init__(self, view, model):
+        self._view = view
+        self._model = model
+
+    def handleCreaGrafo(self, e):
+        v1 = self._view._ddVoto1.value
+        v2 = self._view._ddVoto2.value
+        if v1 is None:
+            self._view.txt_result.controls.clear()
+            self._view.txt_result.controls.append(ft.Text("Selezionare voto minimo", color="red"))
+            self._view.update_page(); return
+        if v2 is None:
+            self._view.txt_result.controls.clear()
+            self._view.txt_result.controls.append(ft.Text("Selezionare voto massimo", color="red"))
+            self._view.update_page(); return
+        if float(v1) > float(v2):
+            self._view.txt_result.controls.clear()
+            self._view.txt_result.controls.append(ft.Text("Voto min deve essere <= voto max", color="red"))
+            self._view.update_page(); return
+        self._model.buildGraph(v1, v2)
+        nodi, archi = self._model.graphDetails()
+        self._view.txt_result.controls.clear()
+        self._view.txt_result.controls.append(ft.Text("Grafo correttamente creato:"))
+        self._view.txt_result.controls.append(ft.Text(f"Numero di nodi:{nodi}"))
+        self._view.txt_result.controls.append(ft.Text(f"Numero di archi:{archi}"))
+        top5 = self._model.getTop5Archi()
+        self._view.txt_result.controls.append(ft.Text("Top 5 archi:"))
+        for a in top5:
+            self._view.txt_result.controls.append(
+                ft.Text(f"{a[0]} -> {a[1]} : {a[2]['weight']}"))
+        n = self._model.getNumeroComponenti()
+        self._view.txt_result.controls.append(
+            ft.Text(f"Il grafo ha {n} componenti connesse"))
+        maggiore = self._model.getMaggioreComponente()
+        self._view.txt_result.controls.append(
+            ft.Text(f"La più grande componente connessa è lunga {len(maggiore)}:"))
+        for nodo in maggiore:
+            self._view.txt_result.controls.append(ft.Text(f"{nodo}"))
+        self._view.update_page()
+
+    def handleTrovaCammino(self, e):
+        pass
+
+    def fillDD(self):
+        voti = self._model.getVoti()
+        for v in voti:
+            self._view._ddVoto1.options.append(ft.dropdown.Option(v))
+            self._view._ddVoto2.options.append(ft.dropdown.Option(v))
+        self._view.update_page()
