@@ -1,0 +1,193 @@
+=== Customer.py ===
+
+from dataclasses import dataclass
+
+@dataclass
+class Customer:
+    CustomerId: int
+    FirstName: str
+    LastName: str
+    Company: str
+    Address: str
+    City: str
+    State: str
+    Country: str
+    PostalCode: str
+    Phone: str
+    Fax: str
+    Email: str
+    SupportRepId: int
+
+    def __hash__(self): return hash(self.CustomerId)
+    def __eq__(self, other): return self.CustomerId == other.CustomerId
+    def __str__(self): return f"{self.FirstName} {self.LastName}"
+
+
+=== DAO.py ===
+
+from database.DB_connect import DBConnect
+from model.customer import Customer
+
+class DAO():
+
+    @staticmethod
+    def getCountries():
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """SELECT DISTINCT Country FROM Customer
+                   WHERE Country IS NOT NULL ORDER BY Country ASC"""
+        cursor.execute(query)
+        res = [row["Country"] for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getGenres():
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = "SELECT Name FROM Genre ORDER BY Name ASC"
+        cursor.execute(query)
+        res = [row["Name"] for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getNodi(country):
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = "SELECT * FROM Customer WHERE Country = %s"
+        cursor.execute(query, (country,))
+        res = [Customer(**row) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getNodiAttivi(country, genre):
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT c.CustomerId, SUM(i2.Total) AS spesa_totale
+            FROM Customer c, Invoice i2
+            WHERE c.Country = %s
+            AND c.CustomerId = i2.CustomerId
+            AND c.CustomerId IN (
+                SELECT DISTINCT c2.CustomerId
+                FROM Customer c2, Invoice i, InvoiceLine il, Track t, Genre g
+                WHERE c2.CustomerId = i.CustomerId
+                AND i.InvoiceId = il.InvoiceId
+                AND il.TrackId = t.TrackId
+                AND t.GenreId = g.GenreId
+                AND g.Name = %s
+            )
+            GROUP BY c.CustomerId
+        """
+        cursor.execute(query, (country, genre))
+        res = [(row["CustomerId"], row["spesa_totale"]) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+
+=== Model.py ===
+
+import networkx as nx
+from itertools import combinations
+from database.DAO import DAO
+
+class Model:
+    def __init__(self):
+        self._graph = nx.Graph()
+        self._idMap = {}
+        self._speseMap = {}
+
+    def buildGraph(self, country, genre):
+        self._graph.clear()
+        self._idMap.clear()
+        self._speseMap.clear()
+        nodi = DAO.getNodi(country)
+        for n in nodi:
+            self._idMap[n.CustomerId] = n
+        self._graph.add_nodes_from(nodi)
+        for cid, spesa in DAO.getNodiAttivi(country, genre):
+            self._speseMap[cid] = spesa
+        attivi = list(self._speseMap.keys())
+        for i in range(len(attivi)):
+            for j in range(i+1, len(attivi)):
+                a, b = attivi[i], attivi[j]
+                peso = self._speseMap[a] + self._speseMap[b]
+                self._graph.add_edge(self._idMap[a], self._idMap[b], weight=peso)
+
+    def graphDetails(self):
+        return len(self._graph.nodes), len(self._graph.edges)
+
+    def getTop3Archi(self):
+        return sorted(self._graph.edges(data=True),
+                      key=lambda x: x[2]["weight"], reverse=True)[:3]
+
+    def getNumeroComponenti(self):
+        return nx.number_connected_components(self._graph)
+
+    def getMaggioreOrdinata(self):
+        largest = max(nx.connected_components(self._graph), key=len)
+        ordinati = sorted(largest,
+                          key=lambda n: self._speseMap.get(n.CustomerId, 0),
+                          reverse=True)
+        return [(n, self._speseMap.get(n.CustomerId, 0)) for n in ordinati]
+
+    def getCountries(self):
+        return DAO.getCountries()
+
+    def getGenres(self):
+        return DAO.getGenres()
+
+
+=== Controller.py ===
+
+import flet as ft
+
+class Controller:
+    def __init__(self, view, model):
+        self._view = view
+        self._model = model
+
+    def handleCreaGrafo(self, e):
+        country = self._view._ddCountry.value
+        genre = self._view._ddGenre.value
+        if country is None:
+            self._view.txt_result.controls.clear()
+            self._view.txt_result.controls.append(ft.Text("Selezionare un paese", color="red"))
+            self._view.update_page(); return
+        if genre is None:
+            self._view.txt_result.controls.clear()
+            self._view.txt_result.controls.append(ft.Text("Selezionare un genere", color="red"))
+            self._view.update_page(); return
+        self._model.buildGraph(country, genre)
+        nodi, archi = self._model.graphDetails()
+        self._view.txt_result.controls.clear()
+        self._view.txt_result.controls.append(ft.Text(f"Numero di nodi: {nodi}"))
+        self._view.txt_result.controls.append(ft.Text(f"Numero di archi: {archi}"))
+        top3 = self._model.getTop3Archi()
+        self._view.txt_result.controls.append(ft.Text("I 3 archi di peso maggiore:"))
+        for a in top3:
+            self._view.txt_result.controls.append(
+                ft.Text(f"{a[0]} <-> {a[1]} | peso = {a[2]['weight']:.2f}"))
+        n = self._model.getNumeroComponenti()
+        self._view.txt_result.controls.append(ft.Text(f"Numero di componenti connesse: {n}"))
+        self._view.update_page()
+
+    def handleDettagliComponente(self, e):
+        if len(self._model._graph.nodes) == 0:
+            self._view.txt_result.controls.append(ft.Text("Creare prima il grafo", color="red"))
+            self._view.update_page(); return
+        lista = self._model.getMaggioreOrdinata()
+        self._view.txt_result.controls.append(ft.Text("Componente piu grande:"))
+        for nodo, spesa in lista:
+            self._view.txt_result.controls.append(
+                ft.Text(f"{nodo.FirstName} {nodo.LastName} -- spesa: {spesa:.2f}"))
+        self._view.update_page()
+
+    def fillDD(self):
+        for c in self._model.getCountries():
+            self._view._ddCountry.options.append(ft.dropdown.Option(c))
+        for g in self._model.getGenres():
+            self._view._ddGenre.options.append(ft.dropdown.Option(g))
+        self._view.update_page()
