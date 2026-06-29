@@ -36,26 +36,26 @@ from model.customer import Customer
 class DAO():
 
     @staticmethod
-    def getStates():
+    def getCountries():
         conn = DBConnect.get_connection()
         cursor = conn.cursor(dictionary=True)
-        query = """SELECT DISTINCT State FROM Customer
-                   WHERE State IS NOT NULL AND State <> ''
-                   ORDER BY State ASC"""
+        query = """SELECT DISTINCT Country FROM Customer
+                   WHERE Country IS NOT NULL AND Country <> ''
+                   ORDER BY Country ASC"""
         cursor.execute(query)
         res = []
         for row in cursor:
-            res.append(row["State"])
+            res.append(row["Country"])
         cursor.close()
         conn.close()
         return res
 
     @staticmethod
-    def getNodi(state):
+    def getNodi(country):
         conn = DBConnect.get_connection()
         cursor = conn.cursor(dictionary=True)
-        query = "SELECT * FROM Customer WHERE State = %s"
-        cursor.execute(query, (state,))
+        query = "SELECT * FROM Customer WHERE Country = %s"
+        cursor.execute(query, (country,))
         res = []
         for row in cursor:
             res.append(Customer(**row))
@@ -64,17 +64,17 @@ class DAO():
         return res
 
     @staticmethod
-    def getFatturato(state):
+    def getFatturato(country):
         conn = DBConnect.get_connection()
         cursor = conn.cursor(dictionary=True)
         query = """
             SELECT c.CustomerId, SUM(i.Total) AS fatturato
             FROM Customer c, Invoice i
             WHERE c.CustomerId = i.CustomerId
-            AND c.State = %s
+            AND c.Country = %s
             GROUP BY c.CustomerId
         """
-        cursor.execute(query, (state,))
+        cursor.execute(query, (country,))
         res = []
         for row in cursor:
             res.append((row["CustomerId"], row["fatturato"]))
@@ -83,7 +83,7 @@ class DAO():
         return res
 
     @staticmethod
-    def getArchi(state):
+    def getArchi(country):
         conn = DBConnect.get_connection()
         cursor = conn.cursor(dictionary=True)
         query = """
@@ -91,8 +91,8 @@ class DAO():
             FROM Customer c1, Customer c2,
                  Invoice i1, InvoiceLine il1, Track t1, Album al1,
                  Invoice i2, InvoiceLine il2, Track t2, Album al2
-            WHERE c1.State = %s
-            AND c2.State = %s
+            WHERE c1.Country = %s
+            AND c2.Country = %s
             AND c1.CustomerId < c2.CustomerId
             AND c1.CustomerId = i1.CustomerId
             AND i1.InvoiceId = il1.InvoiceId
@@ -104,7 +104,7 @@ class DAO():
             AND t2.AlbumId = al2.AlbumId
             AND al1.ArtistId = al2.ArtistId
         """
-        cursor.execute(query, (state, state))
+        cursor.execute(query, (country, country))
         res = []
         for row in cursor:
             res.append((row["id1"], row["id2"]))
@@ -124,17 +124,17 @@ class Model:
         self._idMap = {}
         self._fatMap = {}
 
-    def buildGraph(self, state):
+    def buildGraph(self, country):
         self._graph.clear()
         self._idMap.clear()
         self._fatMap.clear()
-        nodi = DAO.getNodi(state)
+        nodi = DAO.getNodi(country)
         for n in nodi:
             self._idMap[n.CustomerId] = n
         self._graph.add_nodes_from(nodi)
-        for cid, fat in DAO.getFatturato(state):
+        for cid, fat in DAO.getFatturato(country):
             self._fatMap[cid] = fat
-        for id1, id2 in DAO.getArchi(state):
+        for id1, id2 in DAO.getArchi(country):
             if id1 not in self._idMap or id2 not in self._idMap:
                 continue
             fat1 = self._fatMap.get(id1, 0)
@@ -161,8 +161,8 @@ class Model:
     def getMaggioreComponente(self):
         return max(nx.weakly_connected_components(self._graph), key=len)
 
-    def getStates(self):
-        return DAO.getStates()
+    def getCountries(self):
+        return DAO.getCountries()
 
 
 === Controller.py ===
@@ -175,14 +175,14 @@ class Controller:
         self._model = model
 
     def handleCreaGrafo(self, e):
-        state = self._view._ddState.value
-        if state is None:
+        country = self._view._ddState.value
+        if country is None:
             self._view.txt_result.controls.clear()
             self._view.txt_result.controls.append(
-                ft.Text("Selezionare uno stato", color="red"))
+                ft.Text("Selezionare un paese", color="red"))
             self._view.update_page()
             return
-        self._model.buildGraph(state)
+        self._model.buildGraph(country)
         nodi, archi = self._model.graphDetails()
         self._view.txt_result.controls.clear()
         self._view.txt_result.controls.append(ft.Text("Grafo correttamente creato:"))
@@ -207,6 +207,6 @@ class Controller:
         pass
 
     def fillDD(self):
-        for s in self._model.getStates():
-            self._view._ddState.options.append(ft.dropdown.Option(s))
+        for c in self._model.getCountries():
+            self._view._ddState.options.append(ft.dropdown.Option(c))
         self._view.update_page()
