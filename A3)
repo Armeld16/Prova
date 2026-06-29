@@ -1,0 +1,196 @@
+=== Artist.py ===
+
+from dataclasses import dataclass, field
+
+@dataclass
+class Artist:
+    ArtistId: int
+    Name: str
+    tracks: list = field(default_factory=list)
+    playlists: set = field(default_factory=set)
+
+    def __hash__(self): return hash(self.ArtistId)
+    def __eq__(self, other): return self.ArtistId == other.ArtistId
+    def __str__(self): return self.Name if self.Name else ""
+
+
+=== DAO.py ===
+
+from database.DB_connect import DBConnect
+from model.artist import Artist
+
+class DAO():
+
+    @staticmethod
+    def getAllArtists():
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = "SELECT * FROM Artist"
+        cursor.execute(query)
+        res = [Artist(**row) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getAllTracks():
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT al.ArtistId, t.TrackId
+            FROM Track t, Album al
+            WHERE t.AlbumId = al.AlbumId
+        """
+        cursor.execute(query)
+        res = [(row["ArtistId"], row["TrackId"]) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getAllPlaylists():
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT al.ArtistId, pt.PlaylistId
+            FROM PlaylistTrack pt, Track t, Album al
+            WHERE pt.TrackId = t.TrackId
+            AND t.AlbumId = al.AlbumId
+        """
+        cursor.execute(query)
+        res = [(row["ArtistId"], row["PlaylistId"]) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getArchi():
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT al1.ArtistId AS id1, al2.ArtistId AS id2,
+                   COUNT(DISTINCT pt1.PlaylistId) AS peso
+            FROM PlaylistTrack pt1, PlaylistTrack pt2,
+                 Track t1, Track t2, Album al1, Album al2
+            WHERE pt1.PlaylistId = pt2.PlaylistId
+            AND pt1.TrackId = t1.TrackId
+            AND pt2.TrackId = t2.TrackId
+            AND t1.AlbumId = al1.AlbumId
+            AND t2.AlbumId = al2.AlbumId
+            AND al1.ArtistId < al2.ArtistId
+            GROUP BY al1.ArtistId, al2.ArtistId
+        """
+        cursor.execute(query)
+        res = [(row["id1"], row["id2"], row["peso"]) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+
+=== Model.py ===
+
+import networkx as nx
+from database.DAO import DAO
+
+class Model:
+    def __init__(self):
+        self._graph = nx.Graph()
+        self._idMap = {}
+
+    def buildGraph(self):
+        self._graph.clear()
+        self._idMap.clear()
+        nodi = DAO.getAllArtists()
+        for n in nodi:
+            self._idMap[n.ArtistId] = n
+        self._graph.add_nodes_from(nodi)
+        for aid, tid in DAO.getAllTracks():
+            if aid in self._idMap:
+                self._idMap[aid].tracks.append(tid)
+        for aid, pid in DAO.getAllPlaylists():
+            if aid in self._idMap:
+                self._idMap[aid].playlists.add(pid)
+        for id1, id2, peso in DAO.getArchi():
+            if id1 in self._idMap and id2 in self._idMap:
+                self._graph.add_edge(
+                    self._idMap[id1], self._idMap[id2], weight=peso)
+
+    def graphDetails(self):
+        return len(self._graph.nodes), len(self._graph.edges)
+
+    def getArtistaMaggioreGrado(self):
+        return max(self._graph.nodes(),
+                   key=lambda n: self._graph.degree(n))
+
+    def getArtistaMassimaPesatura(self):
+        best, bestScore = None, None
+        for v in self._graph.nodes():
+            score = sum(d["weight"]
+                        for _, _, d in self._graph.edges(v, data=True))
+            if bestScore is None or score > bestScore:
+                bestScore, best = score, v
+        return best, bestScore
+
+    def getTop10Archi(self):
+        return sorted(
+            self._graph.edges(data=True),
+            key=lambda x: (-x[2]["weight"],
+                           x[0].Name if x[0].Name else "",
+                           x[1].Name if x[1].Name else ""))[:10]
+
+    def getNumeroComponenti(self):
+        return nx.number_connected_components(self._graph)
+
+    def getMaggioreComponente(self):
+        return max(nx.connected_components(self._graph), key=len)
+
+    def getAllNodes(self):
+        return self._graph.nodes()
+
+
+=== Controller.py ===
+
+import flet as ft
+
+class Controller:
+    def __init__(self, view, model):
+        self._view = view
+        self._model = model
+
+    def handleCreaGrafo(self, e):
+        self._model.buildGraph()
+        nodi, archi = self._model.graphDetails()
+        self._view.txt_result.controls.clear()
+        self._view.txt_result.controls.append(ft.Text("Grafo correttamente creato."))
+        self._view.txt_result.controls.append(ft.Text(f"Numero di nodi: {nodi}"))
+        self._view.txt_result.controls.append(ft.Text(f"Numero di archi: {archi}"))
+        self._view._ddArtista.options.clear()
+        for n in self._model.getAllNodes():
+            self._view._ddArtista.options.append(
+                ft.dropdown.Option(n.ArtistId, n.Name))
+        self._view.update_page()
+
+    def handleStampaInfo(self, e):
+        if len(self._model._graph.nodes) == 0:
+            self._view.txt_result.controls.append(
+                ft.Text("Creare prima il grafo", color="red"))
+            self._view.update_page(); return
+        nodi, archi = self._model.graphDetails()
+        self._view.txt_result.controls.append(
+            ft.Text(f"Numero di vertici: {nodi}"))
+        best_grado = self._model.getArtistaMaggioreGrado()
+        self._view.txt_result.controls.append(
+            ft.Text(f"Artista con grado maggiore: {best_grado} "
+                    f"(grado={self._model._graph.degree(best_grado)})"))
+        best_peso, score = self._model.getArtistaMassimaPesatura()
+        self._view.txt_result.controls.append(
+            ft.Text(f"Artista con somma pesi incidenti massima: {best_peso} "
+                    f"(somma={score})"))
+        top10 = self._model.getTop10Archi()
+        self._view.txt_result.controls.append(ft.Text("Top 10 archi:"))
+        for a in top10:
+            self._view.txt_result.controls.append(
+                ft.Text(f"{a[0]} -> {a[1]} : {a[2]['weight']}"))
+        self._view.update_page()
+
+    def handleTrovaGruppoArtisti(self, e):
+        pass
+
+    def fillDD(self):
+        self._view.update_page()
