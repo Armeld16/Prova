@@ -1,0 +1,192 @@
+=== Customer.py ===
+
+from dataclasses import dataclass
+
+@dataclass
+class Customer:
+    CustomerId: int
+    FirstName: str
+    LastName: str
+    Company: str
+    Address: str
+    City: str
+    State: str
+    Country: str
+    PostalCode: str
+    Phone: str
+    Fax: str
+    Email: str
+    SupportRepId: int
+
+    def __hash__(self): return hash(self.CustomerId)
+    def __eq__(self, other): return self.CustomerId == other.CustomerId
+    def __str__(self): return f"{self.FirstName} {self.LastName}"
+
+
+=== DAO.py ===
+
+from database.DB_connect import DBConnect
+from model.customer import Customer
+
+class DAO():
+
+    @staticmethod
+    def getStates():
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """SELECT DISTINCT State FROM Customer
+                   WHERE State IS NOT NULL AND State <> ''
+                   ORDER BY State ASC"""
+        cursor.execute(query)
+        res = [row["State"] for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getNodi(state):
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = "SELECT * FROM Customer WHERE State = %s"
+        cursor.execute(query, (state,))
+        res = [Customer(**row) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getFatturato(state):
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT c.CustomerId, SUM(i.Total) AS fatturato
+            FROM Customer c, Invoice i
+            WHERE c.CustomerId = i.CustomerId
+            AND c.State = %s
+            GROUP BY c.CustomerId
+        """
+        cursor.execute(query, (state,))
+        res = [(row["CustomerId"], row["fatturato"]) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getArchi(state):
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT DISTINCT c1.CustomerId AS id1, c2.CustomerId AS id2
+            FROM Customer c1, Customer c2,
+                 Invoice i1, InvoiceLine il1, Track t1, Album al1,
+                 Invoice i2, InvoiceLine il2, Track t2, Album al2
+            WHERE c1.State = %s AND c2.State = %s
+            AND c1.CustomerId < c2.CustomerId
+            AND c1.CustomerId = i1.CustomerId
+            AND i1.InvoiceId = il1.InvoiceId
+            AND il1.TrackId = t1.TrackId
+            AND t1.AlbumId = al1.AlbumId
+            AND c2.CustomerId = i2.CustomerId
+            AND i2.InvoiceId = il2.InvoiceId
+            AND il2.TrackId = t2.TrackId
+            AND t2.AlbumId = al2.AlbumId
+            AND al1.ArtistId = al2.ArtistId
+        """
+        cursor.execute(query, (state, state))
+        res = [(row["id1"], row["id2"]) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+
+=== Model.py ===
+
+import networkx as nx
+from database.DAO import DAO
+
+class Model:
+    def __init__(self):
+        self._graph = nx.DiGraph()
+        self._idMap = {}
+        self._fatMap = {}
+
+    def buildGraph(self, state):
+        self._graph.clear()
+        self._idMap.clear()
+        self._fatMap.clear()
+        nodi = DAO.getNodi(state)
+        for n in nodi:
+            self._idMap[n.CustomerId] = n
+        self._graph.add_nodes_from(nodi)
+        for cid, fat in DAO.getFatturato(state):
+            self._fatMap[cid] = fat
+        for id1, id2 in DAO.getArchi(state):
+            if id1 not in self._idMap or id2 not in self._idMap:
+                continue
+            fat1 = self._fatMap.get(id1, 0)
+            fat2 = self._fatMap.get(id2, 0)
+            peso = fat1 + fat2
+            if fat1 > fat2:
+                self._graph.add_edge(self._idMap[id1], self._idMap[id2], weight=peso)
+            elif fat2 > fat1:
+                self._graph.add_edge(self._idMap[id2], self._idMap[id1], weight=peso)
+            else:
+                self._graph.add_edge(self._idMap[id1], self._idMap[id2], weight=peso)
+                self._graph.add_edge(self._idMap[id2], self._idMap[id1], weight=peso)
+
+    def graphDetails(self):
+        return len(self._graph.nodes), len(self._graph.edges)
+
+    def getTop5Archi(self):
+        return sorted(self._graph.edges(data=True),
+                      key=lambda x: x[2]["weight"], reverse=True)[:5]
+
+    def getNumeroComponenti(self):
+        return nx.number_weakly_connected_components(self._graph)
+
+    def getMaggioreComponente(self):
+        return max(nx.weakly_connected_components(self._graph), key=len)
+
+    def getStates(self):
+        return DAO.getStates()
+
+
+=== Controller.py ===
+
+import flet as ft
+
+class Controller:
+    def __init__(self, view, model):
+        self._view = view
+        self._model = model
+
+    def handleCreaGrafo(self, e):
+        state = self._view._ddState.value
+        if state is None:
+            self._view.txt_result.controls.clear()
+            self._view.txt_result.controls.append(ft.Text("Selezionare uno stato", color="red"))
+            self._view.update_page(); return
+        self._model.buildGraph(state)
+        nodi, archi = self._model.graphDetails()
+        self._view.txt_result.controls.clear()
+        self._view.txt_result.controls.append(ft.Text("Grafo correttamente creato:"))
+        self._view.txt_result.controls.append(ft.Text(f"Numero di nodi:{nodi}"))
+        self._view.txt_result.controls.append(ft.Text(f"Numero di archi:{archi}"))
+        top5 = self._model.getTop5Archi()
+        self._view.txt_result.controls.append(ft.Text("Top 5 archi:"))
+        for a in top5:
+            self._view.txt_result.controls.append(
+                ft.Text(f"{a[0]} -> {a[1]} : {a[2]['weight']:.2f}"))
+        n = self._model.getNumeroComponenti()
+        self._view.txt_result.controls.append(
+            ft.Text(f"Il grafo ha {n} componenti connesse"))
+        maggiore = self._model.getMaggioreComponente()
+        self._view.txt_result.controls.append(
+            ft.Text(f"Componente più grande ({len(maggiore)} nodi):"))
+        for nodo in maggiore:
+            self._view.txt_result.controls.append(ft.Text(f"{nodo}"))
+        self._view.update_page()
+
+    def handleTrovaCammino(self, e):
+        pass
+
+    def fillDD(self):
+        for s in self._model.getStates():
+            self._view._ddState.options.append(ft.dropdown.Option(s))
+        self._view.update_page()
