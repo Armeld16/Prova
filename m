@@ -10,3 +10,7 @@ def getTop10Archi(self):
                   key=lambda x: (-x[2]["weight"],
                                  x[0].Name if x[0].Name else "",
                                  x[1].Name if x[1].Name else ""))[:10]
+
+for a in top10:
+    self._view.txt_result.controls.append(
+        ft.Text(f"{a[0]} & {a[1]} (peso: {a[2]['weight']})"))
