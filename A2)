@@ -1,0 +1,216 @@
+=== Album.py ===
+
+from dataclasses import dataclass, field
+
+@dataclass
+class Album:
+    AlbumId: int
+    Title: str
+    ArtistId: int
+    tracks: list = field(default_factory=list)
+
+    def __hash__(self): return hash(self.AlbumId)
+    def __eq__(self, other): return self.AlbumId == other.AlbumId
+    def __str__(self): return self.Title
+
+
+=== DAO.py ===
+
+from database.DB_connect import DBConnect
+from model.album import Album
+
+class DAO():
+
+    @staticmethod
+    def getAllAlbums():
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT DISTINCT a.AlbumId, a.Title, a.ArtistId
+            FROM Album a, Track t
+            WHERE a.AlbumId = t.AlbumId
+        """
+        cursor.execute(query)
+        res = [Album(**row) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getTracce(albumId):
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT TrackId, GenreId
+            FROM Track
+            WHERE AlbumId = %s
+        """
+        cursor.execute(query, (albumId,))
+        res = [(row["TrackId"], row["GenreId"]) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+    @staticmethod
+    def getArchi():
+        conn = DBConnect.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT DISTINCT t1.AlbumId AS id1, t2.AlbumId AS id2
+            FROM Track t1, Track t2
+            WHERE t1.GenreId = t2.GenreId
+            AND t1.AlbumId < t2.AlbumId
+        """
+        cursor.execute(query)
+        res = [(row["id1"], row["id2"]) for row in cursor]
+        cursor.close(); conn.close()
+        return res
+
+
+=== Model.py ===
+
+import networkx as nx
+from database.DAO import DAO
+
+class Model:
+    def __init__(self):
+        self._graph = nx.Graph()
+        self._idMap = {}
+
+    def buildGraph(self):
+        self._graph.clear()
+        self._idMap.clear()
+        nodi = DAO.getAllAlbums()
+        for n in nodi:
+            self._idMap[n.AlbumId] = n
+            n.tracks = DAO.getTracce(n.AlbumId)
+        self._graph.add_nodes_from(nodi)
+        for id1, id2 in DAO.getArchi():
+            if id1 in self._idMap and id2 in self._idMap:
+                self._graph.add_edge(self._idMap[id1], self._idMap[id2])
+
+    def graphDetails(self):
+        return len(self._graph.nodes), len(self._graph.edges)
+
+    def getNumeroComponenti(self):
+        return nx.number_connected_components(self._graph)
+
+    def getMaggioreComponente(self):
+        return max(nx.connected_components(self._graph), key=len)
+
+    def getComponenteAlbum(self, albumId):
+        source = self._idMap[int(albumId)]
+        return nx.node_connected_component(self._graph, source)
+
+    def getAlbumConKBrani(self, componente, k):
+        return sorted(
+            [n for n in componente if len(n.tracks) >= k],
+            key=lambda n: len(n.tracks), reverse=True)
+
+    def getAllNodes(self):
+        return self._graph.nodes()
+
+
+=== Controller.py ===
+
+import flet as ft
+
+class Controller:
+    def __init__(self, view, model):
+        self._view = view
+        self._model = model
+
+    def handleCreaGrafo(self, e):
+        self._model.buildGraph()
+        nodi, archi = self._model.graphDetails()
+        self._view.txt_result.controls.clear()
+        self._view.txt_result.controls.append(ft.Text("Grafo correttamente creato."))
+        self._view.txt_result.controls.append(ft.Text(f"Numero di nodi: {nodi}"))
+        self._view.txt_result.controls.append(ft.Text(f"Numero di archi: {archi}"))
+        # popola dropdown album
+        self._view._ddAlbum.options.clear()
+        for n in self._model.getAllNodes():
+            self._view._ddAlbum.options.append(ft.dropdown.Option(n.AlbumId, n.Title))
+        self._view.update_page()
+
+    def handleStampaInfo(self, e):
+        if len(self._model._graph.nodes) == 0:
+            self._view.txt_result.controls.append(ft.Text("Creare prima il grafo", color="red"))
+            self._view.update_page(); return
+        n = self._model.getNumeroComponenti()
+        maggiore = self._model.getMaggioreComponente()
+        self._view.txt_result.controls.append(
+            ft.Text(f"Numero componenti connesse: {n}"))
+        self._view.txt_result.controls.append(
+            ft.Text(f"Componente più grande ({len(maggiore)} nodi):"))
+        for nodo in maggiore:
+            self._view.txt_result.controls.append(ft.Text(f"{nodo}"))
+        self._view.update_page()
+
+    def handleTrovaSelezione(self, e):
+        albumId = self._view._ddAlbum.value
+        if albumId is None:
+            self._view.txt_result.controls.append(ft.Text("Selezionare un album", color="red"))
+            self._view.update_page(); return
+        try:
+            k = int(self._view._txtBrani.value)
+        except (ValueError, TypeError):
+            self._view.txt_result.controls.append(ft.Text("Inserire numero brani valido", color="red"))
+            self._view.update_page(); return
+        comp = self._model.getComponenteAlbum(albumId)
+        risultati = self._model.getAlbumConKBrani(comp, k)
+        self._view.txt_result.controls.append(
+            ft.Text(f"Album nella stessa componente con >= {k} brani:"))
+        for n in risultati:
+            self._view.txt_result.controls.append(
+                ft.Text(f"{n.Title} ({len(n.tracks)} brani)"))
+        self._view.update_page()
+
+
+=== View.py ===
+
+import flet as ft
+
+class View(ft.UserControl):
+    def __init__(self, page: ft.Page):
+        super().__init__()
+        self._page = page
+        self._page.title = "TdP - Esame del 29 Giugno 2026 - B"
+        self._page.horizontal_alignment = 'CENTER'
+        self._page.theme_mode = ft.ThemeMode.LIGHT
+        self._page.bgcolor = "#ebf4f4"
+        self._page.window_height = 800
+        self._controller = None
+
+    def load_interface(self):
+        title = ft.Text("TdP - Esame del 29 Giugno 2026 - B", color="blue", size=24)
+        self._page.controls.append(title)
+
+        self._ddAlbum = ft.Dropdown(label="Album", width=300)
+        self._btnCreaGrafo = ft.ElevatedButton(
+            text="Crea grafo",
+            on_click=self._controller.handleCreaGrafo)
+        self._btnStampaInfo = ft.ElevatedButton(
+            text="Stampa Info",
+            on_click=self._controller.handleStampaInfo)
+
+        row1 = ft.Row([self._ddAlbum, self._btnCreaGrafo, self._btnStampaInfo],
+                      alignment=ft.MainAxisAlignment.CENTER)
+        self._page.controls.append(row1)
+
+        self._txtBrani = ft.TextField(label="Numero di brani", width=200)
+        self._btnTrova = ft.ElevatedButton(
+            text="Trova selezione album",
+            on_click=self._controller.handleTrovaSelezione)
+
+        row2 = ft.Row([self._txtBrani, self._btnTrova],
+                      alignment=ft.MainAxisAlignment.CENTER)
+        self._page.controls.append(row2)
+
+        self.txt_result = ft.ListView(expand=1, spacing=10, padding=20, auto_scroll=True)
+        self._page.controls.append(self.txt_result)
+        self._page.update()
+
+    def set_controller(self, controller):
+        self._controller = controller
+
+    def update_page(self):
+        self._page.update()
